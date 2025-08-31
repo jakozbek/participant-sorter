@@ -36,6 +36,25 @@ def get_class_capacity(class_name, config, default_capacity=20):
     return default_capacity
 
 
+def get_class_points_multiplier(class_name, config, default_multiplier=1):
+    """
+    Get points multiplier for a specific class from config.
+
+    Args:
+        class_name (str): Name of the class
+        config (dict): Configuration dictionary
+        default_multiplier (int): Default multiplier if not found in config
+
+    Returns:
+        int: Points multiplier for the class
+    """
+    if "classes" in config and class_name in config["classes"]:
+        return config["classes"][class_name].get(
+            "points_multiplier", default_multiplier
+        )
+    return default_multiplier
+
+
 def check_prerequisites(
     participant_name, class_name, config, user_assignments, class_columns
 ):
@@ -59,12 +78,13 @@ def check_prerequisites(
     if not required_classes:
         return True
 
-    # Check if participant is assigned to any of the required classes
+    # Get all classes the participant is currently assigned to
     participant_classes = set()
-    for slot_assignments in user_assignments[participant_name]:
-        # Find which class the participant is assigned to in each slot
+    for assigned_slot in user_assignments[participant_name]:
+        # Find which classes are in this assigned slot
         for col in class_columns:
-            if slot_assignments == col.split("[")[0].strip():
+            slot_from_col = col.split("[")[0].strip()
+            if slot_from_col == assigned_slot:
                 # Extract class name from column
                 class_info = col.split("[")[1].strip("]")
                 if "(" in class_info and ")" in class_info:
@@ -80,6 +100,56 @@ def check_prerequisites(
             return True
 
     return False
+
+
+def get_conflicting_slots(slot, config):
+    """
+    Get all time slots that conflict with the given slot.
+
+    Args:
+        slot (str): Time slot to check for conflicts
+        config (dict): Configuration dictionary
+
+    Returns:
+        set: Set of conflicting time slots (including the original slot)
+    """
+    conflicting_slots = {slot}  # A slot always conflicts with itself
+
+    if "time_slot_conflicts" in config:
+        # Check if this slot has any defined conflicts
+        if slot in config["time_slot_conflicts"]:
+            conflicting_slots.update(config["time_slot_conflicts"][slot])
+
+        # Check if this slot is listed as a conflict for other slots
+        for other_slot, conflicts in config["time_slot_conflicts"].items():
+            if slot in conflicts:
+                conflicting_slots.add(other_slot)
+                conflicting_slots.update(conflicts)
+
+    return conflicting_slots
+
+
+def check_time_slot_conflicts(participant_name, target_slot, user_assignments, config):
+    """
+    Check if assigning a participant to a time slot would create conflicts.
+
+    Args:
+        participant_name (str): Name of the participant
+        target_slot (str): Time slot to check
+        user_assignments (dict): Current user assignments by time slot
+        config (dict): Configuration dictionary
+
+    Returns:
+        bool: True if there are no conflicts, False if there are conflicts
+    """
+    conflicting_slots = get_conflicting_slots(target_slot, config)
+
+    # Check if user is already assigned to any conflicting slot
+    for assigned_slot in user_assignments[participant_name]:
+        if assigned_slot in conflicting_slots:
+            return False
+
+    return True
 
 
 def assign_participants_with_config(df, config):
@@ -139,8 +209,10 @@ def assign_participants_with_config(df, config):
             for col in slot_columns:
                 for _, row in df.iterrows():
                     full_name = row[name_col]
-                    # Skip if user already assigned to this time slot
-                    if slot in user_assignments[full_name]:
+                    # Skip if user already assigned to this time slot or any conflicting slots
+                    if not check_time_slot_conflicts(
+                        full_name, slot, user_assignments, config
+                    ):
                         continue
 
                     # Extract class name for prerequisite checking
@@ -186,22 +258,26 @@ def assign_participants_with_config(df, config):
 
                 # Assign users until capacity is reached
                 for full_name in sorted_users:
-                    if (
-                        len(assignments[col]) < class_capacity
-                        and slot not in user_assignments[full_name]
+                    if len(
+                        assignments[col]
+                    ) < class_capacity and check_time_slot_conflicts(
+                        full_name, slot, user_assignments, config
                     ):
                         assignments[col].append(full_name)
                         user_assignments[full_name].add(slot)
 
-                        # Award points based on which choice they got
-                        user_points[full_name] += choice_points
+                        # Award points based on which choice they got and class multiplier
+                        points_multiplier = get_class_points_multiplier(
+                            class_name, config
+                        )
+                        user_points[full_name] += choice_points * points_multiplier
 
     # Handle any users not yet assigned by finding available spots
     for _, row in df.iterrows():
         full_name = row[name_col]
         for slot in sorted(time_slots):
-            # Skip if user already has a class in this slot
-            if slot in user_assignments[full_name]:
+            # Skip if user already has a class in this slot or any conflicting slots
+            if not check_time_slot_conflicts(full_name, slot, user_assignments, config):
                 continue
 
             # Find classes with availability in this slot
