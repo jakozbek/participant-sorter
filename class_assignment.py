@@ -1,16 +1,94 @@
 #!/usr/bin/env python3
 
 import pandas as pd
+import json
 from collections import defaultdict
 
 
-def assign_participants(df, class_capacity):
+def load_config(config_path):
     """
-    Assign participants to classes based on their preferences and class capacity.
+    Load configuration from JSON file.
+
+    Args:
+        config_path (str): Path to the configuration JSON file
+
+    Returns:
+        dict: Configuration dictionary
+    """
+    with open(config_path, "r") as f:
+        return json.load(f)
+
+
+def get_class_capacity(class_name, config, default_capacity=20):
+    """
+    Get capacity for a specific class from config.
+
+    Args:
+        class_name (str): Name of the class
+        config (dict): Configuration dictionary
+        default_capacity (int): Default capacity if not found in config
+
+    Returns:
+        int: Class capacity
+    """
+    if "classes" in config and class_name in config["classes"]:
+        return config["classes"][class_name].get("capacity", default_capacity)
+    return default_capacity
+
+
+def check_prerequisites(
+    participant_name, class_name, config, user_assignments, class_columns
+):
+    """
+    Check if participant has completed prerequisites for a class.
+
+    Args:
+        participant_name (str): Name of the participant
+        class_name (str): Name of the class to check prerequisites for
+        config (dict): Configuration dictionary
+        user_assignments (dict): Current user assignments by time slot
+        class_columns (list): List of all class columns
+
+    Returns:
+        bool: True if prerequisites are met, False otherwise
+    """
+    if "classes" not in config or class_name not in config["classes"]:
+        return True
+
+    required_classes = config["classes"][class_name].get("required_classes", [])
+    if not required_classes:
+        return True
+
+    # Check if participant is assigned to any of the required classes
+    participant_classes = set()
+    for slot_assignments in user_assignments[participant_name]:
+        # Find which class the participant is assigned to in each slot
+        for col in class_columns:
+            if slot_assignments == col.split("[")[0].strip():
+                # Extract class name from column
+                class_info = col.split("[")[1].strip("]")
+                if "(" in class_info and ")" in class_info:
+                    paren_start = class_info.rfind("(")
+                    extracted_class_name = class_info[:paren_start].strip()
+                else:
+                    extracted_class_name = class_info.strip()
+                participant_classes.add(extracted_class_name)
+
+    # Check if any required class is satisfied
+    for required_class in required_classes:
+        if required_class in participant_classes:
+            return True
+
+    return False
+
+
+def assign_participants_with_config(df, config):
+    """
+    Assign participants to classes based on their preferences, class capacities, and prerequisites.
 
     Args:
         df (pandas.DataFrame): DataFrame with participant preferences
-        class_capacity (int): Maximum number of participants per class
+        config (dict): Configuration dictionary with class information
 
     Returns:
         dict: Dictionary with class names as keys and lists of participant names as values
@@ -37,11 +115,15 @@ def assign_participants(df, class_capacity):
     user_points = defaultdict(int)
 
     # Create a dictionary to store timestamps for tiebreaking
-    # Assuming there's a "Timestamp" column in the dataframe
     timestamps = {}
-    if "Timestamp" in df.columns:
+    timestamp_col = config.get("csv_info", {}).get("timestamp_column", "Timestamp")
+    name_col = config.get("csv_info", {}).get(
+        "participant_name_column", "What is your full name?"
+    )
+
+    if timestamp_col in df.columns:
         for _, row in df.iterrows():
-            timestamps[row["What is your full name?"]] = row["Timestamp"]
+            timestamps[row[name_col]] = row[timestamp_col]
 
     # Process preferences in order: 1st choice, 2nd choice, 3rd choice
     for choice_idx, choice in enumerate(["1st choice", "2nd choice", "3rd choice"]):
@@ -56,16 +138,41 @@ def assign_participants(df, class_capacity):
             class_seekers = defaultdict(list)
             for col in slot_columns:
                 for _, row in df.iterrows():
-                    full_name = row["What is your full name?"]
+                    full_name = row[name_col]
                     # Skip if user already assigned to this time slot
                     if slot in user_assignments[full_name]:
                         continue
+
+                    # Extract class name for prerequisite checking
+                    class_info = col.split("[")[1].strip("]")
+                    if "(" in class_info and ")" in class_info:
+                        paren_start = class_info.rfind("(")
+                        class_name = class_info[:paren_start].strip()
+                    else:
+                        class_name = class_info.strip()
+
+                    # Check prerequisites
+                    if not check_prerequisites(
+                        full_name, class_name, config, user_assignments, class_columns
+                    ):
+                        continue
+
                     # Check if this is their choice for this class
                     if row[col] == choice:
                         class_seekers[col].append(full_name)
 
             # Then assign users, prioritizing those with fewer points (less satisfied so far)
             for col in slot_columns:
+                # Get class capacity from config
+                class_info = col.split("[")[1].strip("]")
+                if "(" in class_info and ")" in class_info:
+                    paren_start = class_info.rfind("(")
+                    class_name = class_info[:paren_start].strip()
+                else:
+                    class_name = class_info.strip()
+
+                class_capacity = get_class_capacity(class_name, config)
+
                 # Define a key function for sorting users
                 def sort_key(full_name):
                     # Primary sort by points (lower is better)
@@ -91,18 +198,31 @@ def assign_participants(df, class_capacity):
 
     # Handle any users not yet assigned by finding available spots
     for _, row in df.iterrows():
-        full_name = row["What is your full name?"]
+        full_name = row[name_col]
         for slot in sorted(time_slots):
             # Skip if user already has a class in this slot
             if slot in user_assignments[full_name]:
                 continue
 
             # Find classes with availability in this slot
-            available_classes = [
-                col
-                for col in class_columns
-                if slot in col and len(assignments[col]) < class_capacity
-            ]
+            available_classes = []
+            for col in class_columns:
+                if slot in col:
+                    # Get class capacity from config
+                    class_info = col.split("[")[1].strip("]")
+                    if "(" in class_info and ")" in class_info:
+                        paren_start = class_info.rfind("(")
+                        class_name = class_info[:paren_start].strip()
+                    else:
+                        class_name = class_info.strip()
+
+                    class_capacity = get_class_capacity(class_name, config)
+
+                    # Check prerequisites and availability
+                    if len(assignments[col]) < class_capacity and check_prerequisites(
+                        full_name, class_name, config, user_assignments, class_columns
+                    ):
+                        available_classes.append(col)
 
             # Prioritize classes with fewer participants
             available_classes.sort(key=lambda col: len(assignments[col]))
@@ -121,6 +241,50 @@ def assign_participants(df, class_capacity):
         print(f"{full_name}: {user_points[full_name]} points")
 
     return assignments
+
+
+def assign_participants(df, class_capacity):
+    """
+    Legacy function for backward compatibility.
+    Assign participants to classes based on their preferences and class capacity.
+
+    Args:
+        df (pandas.DataFrame): DataFrame with participant preferences
+        class_capacity (int): Maximum number of participants per class
+
+    Returns:
+        dict: Dictionary with class names as keys and lists of participant names as values
+    """
+    # Create a simple config for backward compatibility
+    config = {
+        "csv_info": {
+            "participant_name_column": "What is your full name?",
+            "timestamp_column": "Timestamp",
+        },
+        "classes": {},
+    }
+
+    # Extract class columns to create config
+    class_columns = [
+        col
+        for col in df.columns
+        if "]" in col and "[" in col and "(" in col and ")" in col
+    ]
+
+    for col in class_columns:
+        class_info = col.split("[")[1].strip("]")
+        if "(" in class_info and ")" in class_info:
+            paren_start = class_info.rfind("(")
+            class_name = class_info[:paren_start].strip()
+        else:
+            class_name = class_info.strip()
+
+        config["classes"][class_name] = {
+            "capacity": class_capacity,
+            "required_classes": [],
+        }
+
+    return assign_participants_with_config(df, config)
 
 
 def time_slot_sort_key(slot):
@@ -161,11 +325,6 @@ def time_slot_sort_key(slot):
             hour = int(hour_str) if hour_str else 0
 
         # Adjust for AM/PM
-        # if "pm" in start_time.lower() and hour < 12:
-        #     hour += 12
-        # if "am" in start_time.lower() and hour == 12:
-        #     hour = 0
-
         if "pm" in start_time.lower() and hour < 12:
             hour += 12  # 1pm becomes 13, etc.
         elif "am" in start_time.lower():
@@ -178,13 +337,16 @@ def time_slot_sort_key(slot):
     return 0  # Default for any other format
 
 
-def process_csv_file(csv_file_path, class_capacity, output_csv=None):
+def process_csv_file(
+    csv_file_path, class_capacity=None, config_path=None, output_csv=None
+):
     """
     Process a CSV file of participant preferences and assign them to classes.
 
     Args:
         csv_file_path (str): Path to the CSV file with preferences
-        class_capacity (int): Maximum number of participants per class
+        class_capacity (int, optional): Maximum number of participants per class (legacy)
+        config_path (str, optional): Path to configuration JSON file
         output_csv (str, optional): Path to output CSV file for assignments
 
     Returns:
@@ -196,23 +358,44 @@ def process_csv_file(csv_file_path, class_capacity, output_csv=None):
     # Display available columns to help with debugging
     print("Available columns in CSV:", df.columns.tolist())
 
-    # Check if 'Email Address' exists, otherwise look for similar column
-    name_column = "What is your full name?"
+    # Load config if provided
+    config = None
+    if config_path:
+        config = load_config(config_path)
+        name_column = config.get("csv_info", {}).get(
+            "participant_name_column", "What is your full name?"
+        )
+    else:
+        name_column = "What is your full name?"
+
+    # Check if name column exists
     if name_column not in df.columns:
-        # Try to find alternative full_name column
-        name_candidates = [col for col in df.columns if "full_name" in col.lower()]
+        # Try to find alternative name column
+        name_candidates = [
+            col for col in df.columns if "name" in col.lower() or "email" in col.lower()
+        ]
         if name_candidates:
             name_column = name_candidates[0]
-            print(f"Using '{name_column}' as full_name column")
+            print(f"Using '{name_column}' as name column")
+            # Update config if it exists
+            if config:
+                config["csv_info"]["participant_name_column"] = name_column
             # Rename the column for consistency with the rest of the code
-            df = df.rename(columns={name_column: "What is your full name?"})
+            df = df.rename(columns={name_column: name_column})
         else:
-            print("Error: No full_name column found in CSV file.")
-            print("Please ensure your CSV has a column named 'Email Address'")
+            print("Error: No name column found in CSV file.")
+            print(
+                "Please ensure your CSV has a column with 'name' or 'email' in the title"
+            )
             return {}
 
     # Run assignment algorithm
-    assignments = assign_participants(df, class_capacity)
+    if config:
+        assignments = assign_participants_with_config(df, config)
+    else:
+        if class_capacity is None:
+            class_capacity = 20
+        assignments = assign_participants(df, class_capacity)
 
     # Print results
     print("\nClass Assignments:")
@@ -227,29 +410,47 @@ def process_csv_file(csv_file_path, class_capacity, output_csv=None):
 
         for class_name in sorted(slot_classes):
             class_info = class_name.split("[")[1].strip("]")
-            print(
-                f"  Class {class_info} ({len(assignments[class_name])}/{class_capacity}):"
-            )
-            for full_name in assignments[class_name]:
-                print(f"    - {full_name}")
+
+            # Get class capacity
+            if config:
+                extracted_class_name = class_info
+                if "(" in class_info and ")" in class_info:
+                    paren_start = class_info.rfind("(")
+                    extracted_class_name = class_info[:paren_start].strip()
+                capacity = get_class_capacity(extracted_class_name, config)
+            else:
+                capacity = class_capacity if class_capacity else 20
+
+            print(f"  Class {class_info} ({len(assignments[class_name])}/{capacity}):")
+            for participant_name in assignments[class_name]:
+                print(f"    - {participant_name}")
 
     # Check if any participant wasn't assigned to all time slots
-    participants = df["What is your full name?"].tolist()
+    name_col = (
+        config.get("csv_info", {}).get(
+            "participant_name_column", "What is your full name?"
+        )
+        if config
+        else name_column
+    )
+    participants = df[name_col].tolist()
     participant_assignments = defaultdict(list)
 
     for class_name, names in assignments.items():
         time_slot = class_name.split("[")[0].strip()
-        for full_name in names:
-            participant_assignments[full_name].append(time_slot)
+        for participant_name in names:
+            participant_assignments[participant_name].append(time_slot)
 
     print("\nParticipant Summary:")
     print("===================")
-    for full_name in participants:
-        assigned_slots = participant_assignments[full_name]
+    for participant_name in participants:
+        assigned_slots = participant_assignments[participant_name]
         missing_slots = [slot for slot in time_slots if slot not in assigned_slots]
 
         if missing_slots:
-            print(f"{full_name}: Missing assignments for {', '.join(missing_slots)}")
+            print(
+                f"{participant_name}: Missing assignments for {', '.join(missing_slots)}"
+            )
 
     # Create output CSV if requested
     if output_csv:
@@ -288,14 +489,31 @@ def process_csv_file(csv_file_path, class_capacity, output_csv=None):
 if __name__ == "__main__":
     import sys
 
-    if len(sys.argv) < 3:
+    if len(sys.argv) < 2:
         print(
-            "Usage: python class_assignment.py <csv_file_path> <class_capacity> [output_csv]"
+            "Usage: python class_assignment.py <csv_file_path> [class_capacity] [config_path] [output_csv]"
         )
+        print("  csv_file_path: Path to CSV file with participant preferences")
+        print(
+            "  class_capacity: Default capacity for all classes (optional, use with legacy mode)"
+        )
+        print("  config_path: Path to JSON configuration file (optional)")
+        print("  output_csv: Path to output CSV file (optional)")
         sys.exit(1)
 
     csv_file_path = sys.argv[1]
-    class_capacity = int(sys.argv[2])
-    output_csv = sys.argv[3] if len(sys.argv) > 3 else None
 
-    process_csv_file(csv_file_path, class_capacity, output_csv)
+    # Parse arguments - support both old and new formats
+    class_capacity = None
+    config_path = None
+    output_csv = None
+
+    for i, arg in enumerate(sys.argv[2:], 2):
+        if arg.endswith(".json"):
+            config_path = arg
+        elif arg.endswith(".csv"):
+            output_csv = arg
+        elif arg.isdigit():
+            class_capacity = int(arg)
+
+    process_csv_file(csv_file_path, class_capacity, config_path, output_csv)
