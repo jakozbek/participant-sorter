@@ -909,9 +909,11 @@ def create_debug_csv(
     # Print unassigned participants
     unassigned = debug_df[debug_df["Number of Assignments"] == 0]
     if not unassigned.empty:
-        print(f"\nParticipants with no assignments: {len(unassigned)}")
+        print(f"\nParticipants with no assignments ({len(unassigned)}):")
         for _, participant in unassigned.iterrows():
             print(f"  - {participant['Participant']}")
+    else:
+        print("\n✅ All participants received at least one assignment!")
 
 
 def time_slot_sort_key(slot):
