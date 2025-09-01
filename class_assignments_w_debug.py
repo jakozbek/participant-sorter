@@ -182,6 +182,7 @@ def participant_has_remaining_valid_preferences(
     participant_classes_assigned,
     class_columns,
     config,
+    assignments,  # Add assignments parameter
 ):
     """
     Check if a participant has any remaining valid preferences they could potentially get.
@@ -193,6 +194,7 @@ def participant_has_remaining_valid_preferences(
         participant_classes_assigned (dict): Classes already assigned
         class_columns (list): All class columns
         config (dict): Configuration dictionary
+        assignments (dict): Current class assignments
 
     Returns:
         bool: True if they have remaining valid preferences
@@ -233,7 +235,10 @@ def participant_has_remaining_valid_preferences(
                             config,
                             participant_classes_assigned,
                         ):
-                            return True
+                            # Check capacity constraint
+                            class_capacity = get_class_capacity(class_name, config)
+                            if len(assignments[col]) < class_capacity:
+                                return True
 
     return False
 
@@ -325,7 +330,7 @@ def assign_participants_with_config(df, config):
 
     # Track attempts without any assignment to know when to stop
     attempts_without_assignment = 0
-    max_attempts_per_point_level = len(df)  # Max attempts at current point level
+    max_attempts_per_point_level = len(df) * 4  # Max attempts at current point level
 
     # Track current point level being processed
     current_point_level = 0
@@ -375,43 +380,76 @@ def assign_participants_with_config(df, config):
                 slot = col.split("[")[0].strip()
                 class_name = extract_class_name_from_column(col)
 
-                # Check all constraints
+                # if participant_name == "theyearofplenty@gmail.com":
+                print(
+                    f"    🔍 Attempting: {participant_name} -> {class_name} ({choice_level}) in {slot}"
+                )
+
+                # Check all constraints with detailed logging
                 class_capacity = get_class_capacity(class_name, config)
 
-                if (
-                    len(assignments[col]) < class_capacity
-                    and check_time_slot_conflicts(
-                        participant_name, slot, user_assignments, config
-                    )
-                    and not check_already_assigned_to_class(
-                        participant_name, class_name, participant_classes_assigned
-                    )
-                    and check_prerequisites(
-                        participant_name,
-                        class_name,
-                        config,
-                        participant_classes_assigned,
-                    )
-                ):
-                    # Make the assignment
-                    assignments[col].append(participant_name)
-                    user_assignments[participant_name].add(slot)
-                    participant_classes_assigned[participant_name].add(class_name)
-
-                    # Award points
-                    points_multiplier = get_class_points_multiplier(class_name, config)
-                    user_points[participant_name] += choice_points * points_multiplier
-
-                    assigned = True
-                    assignments_made += 1
-                    attempts_without_assignment = (
-                        0  # Reset counter on successful assignment
-                    )
-
+                # Check capacity constraint
+                if len(assignments[col]) >= class_capacity:
                     print(
-                        f"  [{assignments_made}] {participant_name} -> {class_name} in {slot} ({choice_level}, now at {user_points[participant_name]} points)"
+                        f"      ❌ BLOCKED: Class full ({len(assignments[col])}/{class_capacity})"
                     )
-                    break
+                    continue
+
+                # Check time slot conflicts
+                if not check_time_slot_conflicts(
+                    participant_name, slot, user_assignments, config
+                ):
+                    conflicting_slots = get_conflicting_slots(slot, config)
+                    assigned_slots = list(user_assignments[participant_name])
+                    print(
+                        f"      ❌ BLOCKED: Time conflict - slot '{slot}' conflicts with assigned slots {assigned_slots}"
+                    )
+                    continue
+
+                # Check if already assigned to this class
+                if check_already_assigned_to_class(
+                    participant_name, class_name, participant_classes_assigned
+                ):
+                    print(f"      ❌ BLOCKED: Already assigned to '{class_name}'")
+                    continue
+
+                # Check prerequisites
+                if not check_prerequisites(
+                    participant_name, class_name, config, participant_classes_assigned
+                ):
+                    required_classes = (
+                        config.get("classes", {})
+                        .get(class_name, {})
+                        .get("required_classes", [])
+                    )
+                    assigned_classes = list(
+                        participant_classes_assigned[participant_name]
+                    )
+                    print(
+                        f"      ❌ BLOCKED: Missing prerequisites - needs {required_classes}, has {assigned_classes}"
+                    )
+                    continue
+
+                # All checks passed!
+                print(f"      ✅ SUCCESS: All constraints satisfied")
+
+                # Make the assignment
+                assignments[col].append(participant_name)
+                user_assignments[participant_name].add(slot)
+                participant_classes_assigned[participant_name].add(class_name)
+
+                # Award points
+                points_multiplier = get_class_points_multiplier(class_name, config)
+                user_points[participant_name] += choice_points * points_multiplier
+
+                assigned = True
+                assignments_made += 1
+                attempts_without_assignment = 0
+
+                print(
+                    f"  [{assignments_made}] {participant_name} -> {class_name} in {slot} ({choice_level}, now at {user_points[participant_name]} points)"
+                )
+                break
 
         # Decide whether to re-add participant to queue
         if assigned:
@@ -423,6 +461,7 @@ def assign_participants_with_config(df, config):
                 participant_classes_assigned,
                 class_columns,
                 config,
+                assignments,
             ):
                 # Re-add with updated points
                 new_points = user_points[participant_name]
@@ -447,6 +486,7 @@ def assign_participants_with_config(df, config):
                 participant_classes_assigned,
                 class_columns,
                 config,
+                assignments,
             ):
                 # They still have valid preferences but couldn't get them this round
                 # Re-add to queue
@@ -460,6 +500,17 @@ def assign_participants_with_config(df, config):
 
         # Check if we're stuck at the current point level
         if attempts_without_assignment >= max_attempts_per_point_level:
+            print(f"\n🔍 DEBUGGING GRIDLOCK DETECTION at level {current_point_level}:")
+            print(f"  attempts_without_assignment: {attempts_without_assignment}")
+            print(f"  max_attempts_per_point_level: {max_attempts_per_point_level}")
+            print(
+                f"  participants_at_current_level: {len(participants_at_current_level)}"
+            )
+
+            # Print all participants at this leve
+            for p in participants_at_current_level:
+                print(f"    - {p} (Points: {user_points[p]})")
+
             # Check if there are participants at higher point levels who might still have assignments
             remaining_participants = []
             temp_queue = []
@@ -470,10 +521,6 @@ def assign_participants_with_config(df, config):
                 temp_queue.append(item)
                 if item[2] not in fully_processed:
                     remaining_participants.append(item)
-
-            # Put everyone back in the queue
-            for item in temp_queue:
-                heapq.heappush(priority_queue, item)
 
             # Check if there are participants at higher point levels with valid preferences
             higher_point_participants = [
@@ -487,6 +534,7 @@ def assign_participants_with_config(df, config):
                     participant_classes_assigned,
                     class_columns,
                     config,
+                    assignments,
                 )
             ]
 
@@ -494,23 +542,39 @@ def assign_participants_with_config(df, config):
                 print(
                     f"  Stuck at point level {current_point_level}, but found {len(higher_point_participants)} participants at higher levels with valid preferences"
                 )
-                print(f"  Advancing to next point level...")
+                print(
+                    f"  Breaking gridlock by adding 1 point to all participants at level {current_point_level}"
+                )
 
-                # Mark all participants at current level as processed if they have no valid preferences
-                for p_name in list(participants_at_current_level):
-                    if not participant_has_remaining_valid_preferences(
-                        p_name,
-                        participant_preferences,
-                        user_assignments,
-                        participant_classes_assigned,
-                        class_columns,
-                        config,
-                    ):
-                        fully_processed.add(p_name)
+                # Add 1 point to all participants at the current gridlocked level
+                gridlocked_participants = [
+                    p
+                    for p in remaining_participants
+                    if user_points[p[2]] == current_point_level
+                ]
 
-                # Reset for next point level
+                for participant_info in gridlocked_participants:
+                    participant_name = participant_info[2]
+                    user_points[participant_name] += 1
+                    print(
+                        f"    -> {participant_name}: {current_point_level} -> {user_points[participant_name]} points"
+                    )
+
+                # Rebuild the priority queue with updated points
+                priority_queue.clear()
+                for item in temp_queue:
+                    participant_name = item[2]
+                    if participant_name not in fully_processed:
+                        # Use updated points for the priority
+                        updated_points = user_points[participant_name]
+                        heapq.heappush(
+                            priority_queue, (updated_points, item[1], participant_name)
+                        )
+
+                # Reset counters
                 attempts_without_assignment = 0
-                # The next iteration will naturally pick up the next lowest point level
+                participants_at_current_level.clear()
+                # current_point_level will be updated naturally in the next iteration
             else:
                 print(
                     f"  No participants at any point level have remaining valid preferences"
@@ -654,32 +718,6 @@ def assign_participants_with_config(df, config):
             print(f"\n  {participant_name} (Points: {user_points[participant_name]}):")
             for m in missed[:3]:  # Show first 3 missed opportunities
                 print(f"    - {m['class']} at {m['slot']} ({m['choice_level']})")
-
-    # Summary of why preferences weren't fulfilled
-    print("\nReasons for unfulfilled preferences:")
-    for reason, count in unfulfilled_by_reason.items():
-        if count > 0:
-            print(f"  {reason.replace('_', ' ').title()}: {count}")
-
-    # Check for completely unassigned participants who had valid preferences
-    unassigned_with_preferences = []
-    for participant_name in participant_preferences:
-        if participant_name not in user_assignments:
-            # Check if they had any valid preferences at all
-            has_valid_pref = False
-            for choice_level in choice_levels:
-                if participant_preferences[participant_name][choice_level]:
-                    has_valid_pref = True
-                    break
-            if has_valid_pref:
-                unassigned_with_preferences.append(participant_name)
-
-    if unassigned_with_preferences:
-        print(
-            f"\n⚠️  WARNING: {len(unassigned_with_preferences)} participants with preferences got NO assignments:"
-        )
-        for participant_name in unassigned_with_preferences[:5]:
-            print(f"  - {participant_name}")
 
     # Analyze specific time slot utilization
     print("\n" + "=" * 50)
@@ -948,26 +986,26 @@ def process_csv_file(csv_file_path, config_path, output_csv=None, use_short_name
     )
 
     # Print results
-    print("\nClass Assignments:")
-    print("=================")
-
+    # print("\nClass Assignments:")
+    # print("=================")
+    #
     # Group by time slot for better readability
     time_slots = set(col.split("[")[0].strip() for col in assignments.keys())
-
-    for slot in sorted(time_slots, key=time_slot_sort_key):
-        print(f"\n{slot}:")
-        slot_classes = [col for col in assignments.keys() if slot in col]
-
-        for class_name in sorted(slot_classes):
-            class_info = class_name.split("[")[1].strip("]")
-
-            # Get class capacity
-            extracted_class_name = extract_class_name_from_column(class_name)
-            capacity = get_class_capacity(extracted_class_name, config)
-
-            print(f"  {class_info} ({len(assignments[class_name])}/{capacity}):")
-            for participant_name in sorted(assignments[class_name]):
-                print(f"    - {participant_name}")
+    #
+    # for slot in sorted(time_slots, key=time_slot_sort_key):
+    #     print(f"\n{slot}:")
+    #     slot_classes = [col for col in assignments.keys() if slot in col]
+    #
+    #     for class_name in sorted(slot_classes):
+    #         class_info = class_name.split("[")[1].strip("]")
+    #
+    #         # Get class capacity
+    #         extracted_class_name = extract_class_name_from_column(class_name)
+    #         capacity = get_class_capacity(extracted_class_name, config)
+    #
+    #         print(f"  {class_info} ({len(assignments[class_name])}/{capacity}):")
+    #         for participant_name in sorted(assignments[class_name]):
+    #             print(f"    - {participant_name}")
 
     # Check assignment completeness
     participants = df[actual_name_col].tolist()
