@@ -414,7 +414,11 @@ def time_slot_sort_key(slot):
 
 
 def process_csv_file(
-    csv_file_path, class_capacity=None, config_path=None, output_csv=None
+    csv_file_path,
+    class_capacity=None,
+    config_path=None,
+    output_csv=None,
+    use_short_names=True,
 ):
     """
     Process a CSV file of participant preferences and assign them to classes.
@@ -424,6 +428,7 @@ def process_csv_file(
         class_capacity (int, optional): Maximum number of participants per class (legacy)
         config_path (str, optional): Path to configuration JSON file
         output_csv (str, optional): Path to output CSV file for assignments
+        use_short_names (bool, optional): Use first and last name columns instead of full name/email in output
 
     Returns:
         dict: Dictionary with class names as keys and lists of participant names as values
@@ -541,6 +546,22 @@ def process_csv_file(
         # Create a dictionary to store class data
         csv_data = {}
 
+        # Helper function to format names
+        def format_name(full_name_or_email):
+            if not use_short_names:
+                return full_name_or_email
+
+            # Find the row with this participant to get their first and last name
+            if "First Name" in df.columns and "Last Name" in df.columns:
+                matching_row = df[df[name_col] == full_name_or_email]
+                if not matching_row.empty:
+                    first_name = matching_row.iloc[0]["First Name"]
+                    last_name = matching_row.iloc[0]["Last Name"]
+                    return f"{first_name} {last_name}"
+
+            # Fallback to original name if columns not found
+            return full_name_or_email
+
         # Group classes by time slot for better organization
         for slot in sorted(time_slots, key=time_slot_sort_key):
             slot_classes = [col for col in assignments.keys() if slot in col]
@@ -551,7 +572,7 @@ def process_csv_file(
                 column_name = f"{slot} - {class_info}"
 
                 # Add names for this class, padding with empty strings if needed
-                names = assignments[class_name]
+                names = [format_name(name) for name in assignments[class_name]]
                 csv_data[column_name] = names + [""] * (max_students - len(names))
 
         # Convert to DataFrame and save to CSV
