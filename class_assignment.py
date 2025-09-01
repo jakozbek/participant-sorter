@@ -543,6 +543,19 @@ def process_csv_file(
         # Find the maximum number of students assigned to any class
         max_students = max(len(names) for names in assignments.values())
 
+        # Also consider missing participants when calculating max length
+        max_missing_per_slot = 0
+        for slot in time_slots:
+            missing_count = 0
+            for participant_name in participants:
+                assigned_slots = participant_assignments[participant_name]
+                if slot not in assigned_slots:
+                    missing_count += 1
+            max_missing_per_slot = max(max_missing_per_slot, missing_count)
+
+        # Use the larger of the two for consistent column length
+        max_length = max(max_students, max_missing_per_slot)
+
         # Create a dictionary to store class data
         csv_data = {}
 
@@ -569,11 +582,38 @@ def process_csv_file(
             for class_name in sorted(slot_classes):
                 # Extract just the class number for the column header
                 class_info = class_name.split("[")[1].strip("]")
-                column_name = f"{slot} - {class_info}"
+
+                # Get class capacity for the header
+                if config:
+                    extracted_class_name = class_info
+                    if "(" in class_info and ")" in class_info:
+                        paren_start = class_info.rfind("(")
+                        extracted_class_name = class_info[:paren_start].strip()
+                    capacity = get_class_capacity(extracted_class_name, config)
+                else:
+                    capacity = class_capacity if class_capacity else 20
+
+                # Create column name with enrollment/capacity
+                current_enrollment = len(assignments[class_name])
+                column_name = f"{slot} - {class_info} ({current_enrollment}/{capacity})"
 
                 # Add names for this class, padding with empty strings if needed
                 names = [format_name(name) for name in assignments[class_name]]
-                csv_data[column_name] = names + [""] * (max_students - len(names))
+                csv_data[column_name] = names + [""] * (max_length - len(names))
+
+        # Add columns for participants missing assignments
+        for slot in sorted(time_slots, key=time_slot_sort_key):
+            missing_for_slot = []
+            for participant_name in participants:
+                assigned_slots = participant_assignments[participant_name]
+                if slot not in assigned_slots:
+                    missing_for_slot.append(format_name(participant_name))
+
+            if missing_for_slot:
+                column_name = f"Missing {slot}"
+                # Pad to match the maximum length
+                missing_for_slot += [""] * (max_length - len(missing_for_slot))
+                csv_data[column_name] = missing_for_slot
 
         # Convert to DataFrame and save to CSV
         output_df = pd.DataFrame(csv_data)
