@@ -161,7 +161,7 @@ def assign_participants_with_config(df, config):
         config (dict): Configuration dictionary with class information
 
     Returns:
-        dict: Dictionary with class names as keys and lists of participant names as values
+        tuple: (assignments dict, user_points dict, timestamps dict, name_col)
     """
     # Extract class columns and time slots
     class_columns = [
@@ -316,51 +316,72 @@ def assign_participants_with_config(df, config):
     for full_name in sorted(user_points.keys()):
         print(f"{full_name}: {user_points[full_name]} points")
 
-    return assignments
+    return assignments, user_points, timestamps, name_col
 
 
-def assign_participants(df, class_capacity):
+def create_debug_csv(df, user_points, timestamps, name_col, debug_csv_path):
     """
-    Legacy function for backward compatibility.
-    Assign participants to classes based on their preferences and class capacity.
+    Create a debug CSV file with participant points and duplicate detection.
 
     Args:
-        df (pandas.DataFrame): DataFrame with participant preferences
-        class_capacity (int): Maximum number of participants per class
-
-    Returns:
-        dict: Dictionary with class names as keys and lists of participant names as values
+        df (pandas.DataFrame): Original CSV data
+        user_points (dict): Points awarded to each participant
+        timestamps (dict): Timestamps for each participant
+        name_col (str): Name of the participant name column
+        debug_csv_path (str): Path for the debug CSV output
     """
-    # Create a simple config for backward compatibility
-    config = {
-        "csv_info": {
-            "participant_name_column": "What is your full name?",
-            "timestamp_column": "Timestamp",
-        },
-        "classes": {},
-    }
+    debug_data = []
 
-    # Extract class columns to create config
-    class_columns = [
-        col
-        for col in df.columns
-        if "]" in col and "[" in col and "(" in col and ")" in col
-    ]
+    # Track participants we've seen to detect duplicates
+    seen_participants = {}
 
-    for col in class_columns:
-        class_info = col.split("[")[1].strip("]")
-        if "(" in class_info and ")" in class_info:
-            paren_start = class_info.rfind("(")
-            class_name = class_info[:paren_start].strip()
+    for _, row in df.iterrows():
+        participant_name = row[name_col]
+        timestamp = timestamps.get(participant_name, "No timestamp")
+        points = user_points.get(participant_name, 0)
+
+        # Check for duplicate submissions
+        is_duplicate = False
+        duplicate_info = ""
+
+        if participant_name in seen_participants:
+            is_duplicate = True
+            previous_timestamp = seen_participants[participant_name]
+            duplicate_info = f"Previous submission: {previous_timestamp}"
         else:
-            class_name = class_info.strip()
+            seen_participants[participant_name] = timestamp
 
-        config["classes"][class_name] = {
-            "capacity": class_capacity,
-            "required_classes": [],
-        }
+        # Get first and last name if available
+        first_name = row.get("First Name", "")
+        last_name = row.get("Last Name", "")
 
-    return assign_participants_with_config(df, config)
+        debug_data.append(
+            {
+                "Participant": participant_name,
+                "First Name": first_name,
+                "Last Name": last_name,
+                "Points Awarded": points,
+                "Submission Timestamp": timestamp,
+                "Is Duplicate": "Yes" if is_duplicate else "No",
+                "Duplicate Info": duplicate_info,
+            }
+        )
+
+    # Create DataFrame and save
+    debug_df = pd.DataFrame(debug_data)
+    debug_df = debug_df.sort_values(["Points Awarded", "Submission Timestamp"])
+    debug_df.to_csv(debug_csv_path, index=False)
+
+    print(f"\nDebug information saved to: {debug_csv_path}")
+
+    # Print duplicate summary
+    duplicates = debug_df[debug_df["Is Duplicate"] == "Yes"]
+    if not duplicates.empty:
+        print(f"Found {len(duplicates)} duplicate submissions:")
+        for _, dup in duplicates.iterrows():
+            print(f"  - {dup['Participant']}")
+    else:
+        print("No duplicate submissions detected.")
 
 
 def time_slot_sort_key(slot):
@@ -413,20 +434,13 @@ def time_slot_sort_key(slot):
     return 0  # Default for any other format
 
 
-def process_csv_file(
-    csv_file_path,
-    class_capacity=None,
-    config_path=None,
-    output_csv=None,
-    use_short_names=True,
-):
+def process_csv_file(csv_file_path, config_path, output_csv=None, use_short_names=True):
     """
     Process a CSV file of participant preferences and assign them to classes.
 
     Args:
         csv_file_path (str): Path to the CSV file with preferences
-        class_capacity (int, optional): Maximum number of participants per class (legacy)
-        config_path (str, optional): Path to configuration JSON file
+        config_path (str): Path to configuration JSON file
         output_csv (str, optional): Path to output CSV file for assignments
         use_short_names (bool, optional): Use first and last name columns instead of full name/email in output
 
@@ -439,15 +453,11 @@ def process_csv_file(
     # Display available columns to help with debugging
     print("Available columns in CSV:", df.columns.tolist())
 
-    # Load config if provided
-    config = None
-    if config_path:
-        config = load_config(config_path)
-        name_column = config.get("csv_info", {}).get(
-            "participant_name_column", "What is your full name?"
-        )
-    else:
-        name_column = "What is your full name?"
+    # Load config
+    config = load_config(config_path)
+    name_column = config.get("csv_info", {}).get(
+        "participant_name_column", "What is your full name?"
+    )
 
     # Check if name column exists
     if name_column not in df.columns:
@@ -458,11 +468,8 @@ def process_csv_file(
         if name_candidates:
             name_column = name_candidates[0]
             print(f"Using '{name_column}' as name column")
-            # Update config if it exists
-            if config:
-                config["csv_info"]["participant_name_column"] = name_column
-            # Rename the column for consistency with the rest of the code
-            df = df.rename(columns={name_column: name_column})
+            # Update config
+            config["csv_info"]["participant_name_column"] = name_column
         else:
             print("Error: No name column found in CSV file.")
             print(
@@ -471,12 +478,13 @@ def process_csv_file(
             return {}
 
     # Run assignment algorithm
-    if config:
-        assignments = assign_participants_with_config(df, config)
-    else:
-        if class_capacity is None:
-            class_capacity = 20
-        assignments = assign_participants(df, class_capacity)
+    assignments, user_points, timestamps, actual_name_col = (
+        assign_participants_with_config(df, config)
+    )
+
+    # Create debug CSV
+    debug_csv_path = csv_file_path.replace(".csv", "_debug.csv")
+    create_debug_csv(df, user_points, timestamps, actual_name_col, debug_csv_path)
 
     # Print results
     print("\nClass Assignments:")
@@ -493,18 +501,18 @@ def process_csv_file(
             class_info = class_name.split("[")[1].strip("]")
 
             # Get class capacity
-            if config:
-                extracted_class_name = class_info
-                if "(" in class_info and ")" in class_info:
-                    paren_start = class_info.rfind("(")
-                    extracted_class_name = class_info[:paren_start].strip()
-                capacity = get_class_capacity(extracted_class_name, config)
-            else:
-                capacity = class_capacity if class_capacity else 20
+            extracted_class_name = class_info
+            if "(" in class_info and ")" in class_info:
+                paren_start = class_info.rfind("(")
+                extracted_class_name = class_info[:paren_start].strip()
+            capacity = get_class_capacity(extracted_class_name, config)
 
             print(f"  Class {class_info} ({len(assignments[class_name])}/{capacity}):")
             for participant_name in assignments[class_name]:
                 print(f"    - {participant_name}")
+
+    # Check if any participant wasn't assigned to all time slots
+    name_col = actual_name_col
 
     # Check if any participant wasn't assigned to all time slots
     name_col = (
@@ -514,7 +522,8 @@ def process_csv_file(
         if config
         else name_column
     )
-    participants = df[name_col].tolist()
+    # Check if any participant wasn't assigned to all time slots
+    participants = df[actual_name_col].tolist()
     participant_assignments = defaultdict(list)
 
     for class_name, names in assignments.items():
@@ -584,14 +593,11 @@ def process_csv_file(
                 class_info = class_name.split("[")[1].strip("]")
 
                 # Get class capacity for the header
-                if config:
-                    extracted_class_name = class_info
-                    if "(" in class_info and ")" in class_info:
-                        paren_start = class_info.rfind("(")
-                        extracted_class_name = class_info[:paren_start].strip()
-                    capacity = get_class_capacity(extracted_class_name, config)
-                else:
-                    capacity = class_capacity if class_capacity else 20
+                extracted_class_name = class_info
+                if "(" in class_info and ")" in class_info:
+                    paren_start = class_info.rfind("(")
+                    extracted_class_name = class_info[:paren_start].strip()
+                capacity = get_class_capacity(extracted_class_name, config)
 
                 # Create column name with enrollment/capacity
                 current_enrollment = len(assignments[class_name])
@@ -626,31 +632,29 @@ def process_csv_file(
 if __name__ == "__main__":
     import sys
 
-    if len(sys.argv) < 2:
+    if len(sys.argv) < 3:
         print(
-            "Usage: python class_assignment.py <csv_file_path> [class_capacity] [config_path] [output_csv]"
+            "Usage: python class_assignment.py <csv_file_path> <config_path> [output_csv] [--short-names]"
         )
         print("  csv_file_path: Path to CSV file with participant preferences")
-        print(
-            "  class_capacity: Default capacity for all classes (optional, use with legacy mode)"
-        )
-        print("  config_path: Path to JSON configuration file (optional)")
+        print("  config_path: Path to JSON configuration file")
         print("  output_csv: Path to output CSV file (optional)")
+        print(
+            "  --short-names: Use first and last name instead of full name/email in output (optional)"
+        )
         sys.exit(1)
 
     csv_file_path = sys.argv[1]
+    config_path = sys.argv[2]
 
-    # Parse arguments - support both old and new formats
-    class_capacity = None
-    config_path = None
+    # Parse remaining arguments
     output_csv = None
+    use_short_names = True
 
-    for i, arg in enumerate(sys.argv[2:], 2):
-        if arg.endswith(".json"):
-            config_path = arg
+    for arg in sys.argv[3:]:
+        if arg == "--short-names":
+            use_short_names = True
         elif arg.endswith(".csv"):
             output_csv = arg
-        elif arg.isdigit():
-            class_capacity = int(arg)
 
-    process_csv_file(csv_file_path, class_capacity, config_path, output_csv)
+    process_csv_file(csv_file_path, config_path, output_csv, use_short_names)
