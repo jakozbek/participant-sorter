@@ -95,6 +95,29 @@ def analyze_csv_structure(csv_file_path):
     # Filter out empty strings and common non-choice values
     choice_values = [val for val in choice_values if val and str(val).strip()]
 
+    # Calculate popularity scores for each class option
+    popularity_scores = defaultdict(
+        lambda: {"total_points": 0, "choice_breakdown": defaultdict(int)}
+    )
+
+    # Point values for choices (1st choice = 5 points, 2nd = 4, etc.)
+    choice_points = {
+        "1st choice": 5,
+        "2nd choice": 4,
+        "3rd choice": 3,
+        "4th choice": 2,
+        "5th choice": 1,
+    }
+
+    # Analyze each participant's choices
+    for _, row in df.iterrows():
+        for col in class_columns:
+            choice = row[col]
+            if pd.notna(choice) and choice in choice_points:
+                points = choice_points[choice]
+                popularity_scores[col]["total_points"] += points
+                popularity_scores[col]["choice_breakdown"][choice] += 1
+
     # Extract unique class names and track their time slots
     unique_classes = set()
     unique_teachers = set()
@@ -134,6 +157,30 @@ def analyze_csv_structure(csv_file_path):
             "description": f"Configuration for {class_name}",
         }
 
+    # Create popularity analysis
+    popularity_analysis = {}
+    for col in class_columns:
+        slot = col.split("[")[0].strip()
+        class_info = col.split("[")[1].strip("]")
+
+        # Extract class name (same logic as above)
+        if "(" in class_info and ")" in class_info:
+            paren_start = class_info.rfind("(")
+            class_name = class_info[:paren_start].strip()
+            teacher = class_info[paren_start + 1 :].rstrip(")").strip()
+        else:
+            class_name = class_info.strip()
+            teacher = None
+
+        popularity_analysis[col] = {
+            "class_name": class_name,
+            "teacher": teacher,
+            "time_slot": slot,
+            "total_points": popularity_scores[col]["total_points"],
+            "choice_breakdown": dict(popularity_scores[col]["choice_breakdown"]),
+            "total_responses": sum(popularity_scores[col]["choice_breakdown"].values()),
+        }
+
     config = {
         "csv_info": {
             "file_path": csv_file_path,
@@ -144,6 +191,7 @@ def analyze_csv_structure(csv_file_path):
         "classes": class_config,
         "unique_class_names": sorted(list(unique_classes)),
         "total_unique_classes": len(unique_classes),
+        "popularity_analysis": popularity_analysis,
     }
 
     return config
@@ -183,10 +231,33 @@ def generate_config_file(csv_file_path, output_config_path=None):
         for class_name in config["unique_class_names"]:
             print(f"  {class_name}")
 
+        # Print popularity analysis
+        print(f"\nClass Popularity Analysis (sorted by total points):")
+        print("=" * 60)
+
+        # Sort by total points descending
+        sorted_popularity = sorted(
+            config["popularity_analysis"].items(),
+            key=lambda x: x[1]["total_points"],
+            reverse=True,
+        )
+
+        for col_name, data in sorted_popularity:
+            if data["total_points"] > 0:  # Only show classes with responses
+                print(f"\n{data['class_name']} - {data['time_slot']}")
+                if data["teacher"]:
+                    print(f"  Teacher: {data['teacher']}")
+                print(f"  Total Points: {data['total_points']}")
+                print(f"  Total Responses: {data['total_responses']}")
+                print(f"  Choice Breakdown:")
+                for choice, count in sorted(data["choice_breakdown"].items()):
+                    print(f"    {choice}: {count} participants")
+
         print(f"\nNext Steps:")
         print(f"1. Edit {output_config_path}")
-        print(f"2. Set capacity values for each class in 'class_capacities'")
-        print(f"3. Use this config file with your assignment script")
+        print(f"2. Set capacity values for each class in 'classes'")
+        print(f"3. Use popularity data to inform capacity decisions")
+        print(f"4. Use this config file with your assignment script")
 
         print(f"\nConfiguration saved to: {output_config_path}")
 
