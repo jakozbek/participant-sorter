@@ -147,7 +147,6 @@ def get_conflicting_slots(slot, config):
         for other_slot, conflicts in config["time_slot_conflicts"].items():
             if slot in conflicts:
                 conflicting_slots.add(other_slot)
-                conflicting_slots.update(conflicts)
 
     return conflicting_slots
 
