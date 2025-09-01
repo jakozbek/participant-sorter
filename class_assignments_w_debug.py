@@ -785,6 +785,7 @@ def create_debug_csv(
     debug_csv_path,
     user_assignments,
     participant_classes_assigned,
+    config,
 ):
     """
     Create an enhanced debug CSV file with detailed assignment information.
@@ -802,6 +803,17 @@ def create_debug_csv(
 
     # Track participants we've seen to detect duplicates
     seen_participants = {}
+
+    # Get all unique time slots from the original data
+    class_columns = [
+        col
+        for col in df.columns
+        if "]" in col and "[" in col and "(" in col and ")" in col
+    ]
+    all_time_slots = sorted(
+        list(set(col.split("[")[0].strip() for col in class_columns)),
+        key=time_slot_sort_key,
+    )
 
     for _, row in df.iterrows():
         participant_name = row[name_col]
@@ -826,6 +838,38 @@ def create_debug_csv(
             sorted(participant_classes_assigned.get(participant_name, []))
         )
 
+        # Get unassigned time slots (accounting for time conflicts)
+        participant_assigned_slots = set(user_assignments.get(participant_name, []))
+        unassigned_slots = []
+
+        for slot in all_time_slots:
+            if slot in participant_assigned_slots:
+                # Already assigned to this slot
+                continue
+
+            # Check if this slot conflicts with any assigned slots
+            slot_conflicts = False
+            for assigned_slot in participant_assigned_slots:
+                conflicting_slots = get_conflicting_slots(assigned_slot, config)
+                if slot in conflicting_slots:
+                    slot_conflicts = True
+                    break
+
+            # Also check if any assigned slot conflicts with this slot
+            if not slot_conflicts:
+                target_conflicting_slots = get_conflicting_slots(slot, config)
+                for assigned_slot in participant_assigned_slots:
+                    if assigned_slot in target_conflicting_slots:
+                        slot_conflicts = True
+                        break
+
+            if not slot_conflicts:
+                unassigned_slots.append(slot)
+
+        unassigned_slots_str = (
+            ", ".join(unassigned_slots) if unassigned_slots else "None"
+        )
+
         # Get first and last name if available
         first_name = row.get("First Name", "")
         last_name = row.get("Last Name", "")
@@ -838,6 +882,7 @@ def create_debug_csv(
                 "Points Awarded": points,
                 "Number of Assignments": num_assignments,
                 "Assigned Time Slots": assigned_slots if assigned_slots else "None",
+                "Unassigned Time Slots": unassigned_slots_str,
                 "Assigned Classes": assigned_classes if assigned_classes else "None",
                 "Submission Timestamp": timestamp,
                 "Is Duplicate": "Yes" if is_duplicate else "No",
@@ -982,6 +1027,7 @@ def process_csv_file(csv_file_path, config_path, output_csv=None, use_short_name
         debug_csv_path,
         user_assignments,
         participant_classes_assigned,
+        config,
     )
 
     # Print results
